@@ -50,9 +50,9 @@ const matrix = {
     let serviceType = 'none';
     if (world.services && world.services.length > 0) {
       // Use the first service's name as the service type
-      // Currently supports: mongodb, redis
+      // Currently supports: mongodb, redis, surrealdb
       const serviceName = world.services[0].name;
-      if (['mongodb', 'redis'].includes(serviceName)) {
+      if (['mongodb', 'redis', 'surrealdb'].includes(serviceName)) {
         serviceType = serviceName;
       }
     }

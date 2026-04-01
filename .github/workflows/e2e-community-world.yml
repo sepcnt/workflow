@@ -82,6 +82,21 @@ jobs:
             sleep 2
           done
 
+      - name: Start SurrealDB
+        if: ${{ inputs.service-type == 'surrealdb' }}
+        run: |
+          docker run -d --name surrealdb -p 8000:8000 \
+            surrealdb/surrealdb:v3 \
+            start --user root --pass root --bind 0.0.0.0:8000 memory
+          echo "Waiting for SurrealDB to be ready..."
+          for i in {1..30}; do
+            if curl -sf http://localhost:8000/health &>/dev/null; then
+              echo "SurrealDB is ready"
+              break
+            fi
+            sleep 2
+          done
+
       - name: Setup environment
         uses: ./.github/actions/setup-workflow-dev
         with:
@@ -135,3 +150,4 @@ jobs:
         run: |
           docker stop mongodb 2>/dev/null || true
           docker stop redis 2>/dev/null || true
+          docker stop surrealdb 2>/dev/null || true
