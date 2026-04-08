@@ -2,7 +2,7 @@
 
 The `"use step"` and `"use workflow"` directives work similarly to `"use server"` in React. A function marked with `"use step"` represents a durable step that executes on the server. A function marked with `"use workflow"` represents a durable workflow that orchestrates steps.
 
-The SWC plugin has 3 modes: **Step mode**, **Workflow mode**, and **Client mode**.
+The SWC plugin has 4 modes: **Step mode**, **Workflow mode**, **Client mode**, and **Detect mode**.
 
 ## Directive Placement
 
@@ -336,7 +336,7 @@ Instance methods can use `"use step"` if the class provides custom serialization
 
 Input:
 ```javascript
-import { WORKFLOW_SERIALIZE, WORKFLOW_DESERIALIZE } from '@vercel/workflow';
+import { WORKFLOW_SERIALIZE, WORKFLOW_DESERIALIZE } from '@workflow/serde';
 
 export class Counter {
   static [WORKFLOW_SERIALIZE](instance) {
@@ -358,7 +358,7 @@ export class Counter {
 Output:
 ```javascript
 import { registerStepFunction } from "workflow/internal/private";
-import { WORKFLOW_SERIALIZE, WORKFLOW_DESERIALIZE } from '@vercel/workflow';
+import { WORKFLOW_SERIALIZE, WORKFLOW_DESERIALIZE } from '@workflow/serde';
 /**__internal_workflows{"steps":{"input.js":{"Counter#add":{"stepId":"step//./input//Counter#add"}}},"classes":{"input.js":{"Counter":{"classId":"class//./input//Counter"}}}}*/;
 export class Counter {
     static [WORKFLOW_SERIALIZE](instance) {
@@ -588,6 +588,29 @@ export class Point {
 
 ---
 
+## Detect Mode
+
+Detect mode is a lightweight, non-transforming mode used during the build discovery phase. It walks the AST to find `"use workflow"`, `"use step"` directives and custom serialization classes, then emits the JSON manifest comment — but does **not** modify any code.
+
+This allows the build system to perform a fast regexp pre-scan to identify candidate files, then run the SWC plugin in detect mode only on those candidates to validate at the AST level. False positives (e.g. directive-like strings inside template literals) are eliminated because the plugin only recognises genuine directive expression statements.
+
+**Plugin Config:**
+```json
+{
+  "mode": "detect",
+  "moduleSpecifier": null
+}
+```
+
+Given the same input as the other mode examples, detect mode produces:
+
+```javascript
+/**__internal_workflows{"steps":{"input.js":{"fetchInventory":{"stepId":"step//./input//fetchInventory"}}},"workflows":{"input.js":{"placeOrder":{"workflowId":"workflow//./input//placeOrder"}}}}*/
+// ... original source code unchanged ...
+```
+
+---
+
 ## Static Methods
 
 Static class methods can be marked with directives. Instance methods are **not supported**.
@@ -813,6 +836,35 @@ Note that:
 - The `classId` in the manifest also uses `Bash`
 - This ensures the registration call references a symbol that's actually in scope at module level
 
+This binding-name preference applies to **all** generated code that references the class at module scope, including:
+- Class serialization registration IIFEs
+- Step method registrations (`registerStepFunction` calls)
+- Workflow method stub assignments
+
+For example, a class expression with step methods:
+
+Input:
+```javascript
+import { WORKFLOW_SERIALIZE, WORKFLOW_DESERIALIZE } from "@workflow/serde";
+
+var LanguageModel = class _LanguageModel {
+  constructor(modelId) { this.modelId = modelId; }
+  static [WORKFLOW_SERIALIZE](inst) { return { modelId: inst.modelId }; }
+  static [WORKFLOW_DESERIALIZE](data) { return new _LanguageModel(data.modelId); }
+  async doStream(prompt) { "use step"; return { stream: prompt }; }
+  static async generate(input) { "use step"; return { result: input }; }
+};
+```
+
+Output (step mode):
+```javascript
+registerStepFunction("step//./input//LanguageModel.generate", LanguageModel.generate);
+registerStepFunction("step//./input//LanguageModel#doStream", LanguageModel.prototype["doStream"]);
+(function(__wf_cls, __wf_id) { /* ... */ })(LanguageModel, "class//./input//LanguageModel");
+```
+
+All references use `LanguageModel` (the binding name), not `_LanguageModel` (the internal class expression name). Only a single class registration IIFE is emitted. The step IDs also use the binding name.
+
 ### Anonymous Class Expression Name Re-insertion
 
 When a serializable class expression has no internal name (anonymous) but has a binding name from a variable declaration, the plugin re-inserts the binding name as the class expression's identifier. This handles the common case where upstream bundlers like esbuild/tsup transform `class Foo { ... }` into `var Foo = class { ... }` (stripping the class name).
@@ -862,6 +914,41 @@ Note that:
 - For typical usage, behavior is preserved while ensuring the `.name` property survives subsequent bundling (an inner class name binding is introduced, which can differ in edge cases that depend on assigning to or shadowing that name inside the class body)
 - Classes that already have an internal name (e.g., `class _Bash { ... }`) are not modified
 - Only classes with serialization methods (`WORKFLOW_SERIALIZE` and `WORKFLOW_DESERIALIZE`) are affected
+
+### Anonymous Default Class Export Rewriting
+
+When an anonymous class with serialization methods or step methods is exported as the default export, the plugin rewrites it into a `const` declaration + re-export so that the class has a binding name accessible at module scope. Without this, the generated registration code would reference an undefined variable.
+
+Input:
+```javascript
+import { WORKFLOW_SERIALIZE, WORKFLOW_DESERIALIZE } from "@workflow/serde";
+
+export default class {
+  constructor(id) { this.id = id; }
+  static [WORKFLOW_SERIALIZE](inst) { return { id: inst.id }; }
+  static [WORKFLOW_DESERIALIZE](data) { return new this(data.id); }
+  async process(input) { "use step"; return { result: input }; }
+}
+```
+
+Output (step mode):
+```javascript
+const __DefaultClass = class __DefaultClass {
+    constructor(id) { this.id = id; }
+    // ... serde methods preserved ...
+    async process(input) { return { result: input }; }
+};
+export default __DefaultClass;
+registerStepFunction("step//./input//__DefaultClass#process", __DefaultClass.prototype["process"]);
+(function(__wf_cls, __wf_id) { /* ... */ })(__DefaultClass, "class//./input//__DefaultClass");
+```
+
+Note that:
+- The anonymous class `export default class { ... }` is rewritten to `const __DefaultClass = class __DefaultClass { ... }; export default __DefaultClass;`
+- When the class has serialization methods, the class expression also gets the binding name re-inserted (e.g., `class __DefaultClass { ... }`). For step-only classes without serde, the class expression remains anonymous (e.g., `class { ... }`) — but the `const` binding name is what matters for module-scope registration code
+- The generated name `__DefaultClass` is used for all registrations (step, class, serde)
+- If `__DefaultClass` is already declared in scope, the name is suffixed (`__DefaultClass$1`, etc.)
+- Named default exports (e.g., `export default class MyService { ... }`) are NOT rewritten — the class name `MyService` is already in scope
 
 ### File Discovery for Custom Serialization
 
@@ -928,6 +1015,7 @@ The plugin emits errors for invalid usage:
 |-------|-------------|
 | Non-async function | Functions with `"use step"` or `"use workflow"` must be async |
 | Instance methods with `"use workflow"` | Only static methods can have `"use workflow"` (not instance methods) |
+| Getters with `"use workflow"` | Getters cannot be marked with `"use workflow"` |
 | Misplaced directive | Directive must be at top of file or start of function body |
 | Conflicting directives | Cannot have both `"use step"` and `"use workflow"` at module level |
 | Invalid exports | Module-level directive files can only export async functions |
@@ -948,6 +1036,69 @@ The plugin supports various function declaration styles:
 - `{ nested: { execute: async () => { "use step"; } } }` - Nested object property
 - `static async method() { "use step"; }` - Static class method
 - `async method() { "use step"; }` - Instance class method (requires custom serialization)
+- `get name() { "use step"; }` - Object literal getter
+- `get name() { "use step"; }` - Class instance getter (requires custom serialization)
+- `static get name() { "use step"; }` - Static class getter
+
+---
+
+## Getter Step Functions
+
+Getters (property accessors) can be marked with `"use step"` to make property access trigger a step invocation. Unlike regular step functions, getters cannot be `async` syntactically, but the framework treats them as async steps. The pattern `await obj.prop` works when `prop` is a getter step.
+
+**Getters cannot be marked with `"use workflow"`** — only `"use step"` is supported.
+
+### Instance getter transformation
+
+**Step mode**: The getter is preserved on the class with the directive stripped. Registration uses `Object.getOwnPropertyDescriptor` to extract the getter function:
+```javascript
+registerStepFunction("step_id", Object.getOwnPropertyDescriptor(ClassName.prototype, "prop").get);
+```
+
+**Workflow mode**: The getter is removed from the class body. A hoisted step proxy variable and `Object.defineProperty` call are emitted:
+```javascript
+var __step_ClassName$prop = globalThis[Symbol.for("WORKFLOW_USE_STEP")]("step_id");
+Object.defineProperty(ClassName.prototype, "prop", {
+  get() { return __step_ClassName$prop.call(this); },
+  configurable: true,
+  enumerable: false
+});
+```
+
+**Client mode**: The getter is preserved with the directive stripped (no registration).
+
+### Static getter transformation
+
+Same as instance getters but targets `ClassName` instead of `ClassName.prototype`, and uses `.` separator in the step ID (same as static methods).
+
+**Step mode**:
+```javascript
+registerStepFunction("step_id", Object.getOwnPropertyDescriptor(ClassName, "prop").get);
+```
+
+**Workflow mode**:
+```javascript
+var __step_ClassName$prop = globalThis[Symbol.for("WORKFLOW_USE_STEP")]("step_id");
+Object.defineProperty(ClassName, "prop", {
+  get() { return __step_ClassName$prop(); },
+  configurable: true,
+  enumerable: false
+});
+```
+
+### Object literal getter transformation
+
+**Step mode**: The getter body is hoisted into an async function wrapper for registration. The original getter is preserved with the directive stripped.
+
+**Workflow mode**: A hoisted step proxy variable is created before the object literal. The getter body is replaced to call the proxy:
+```javascript
+var __step_varName$prop = globalThis[Symbol.for("WORKFLOW_USE_STEP")]("step_id");
+const obj = {
+  get prop() { return __step_varName$prop(); }
+};
+```
+
+**Client mode**: Same as step mode — the getter body is hoisted for `stepId` assignment, original getter preserved.
 
 ---
 
