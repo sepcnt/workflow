@@ -136,7 +136,7 @@
       "name": "SurrealDB",
       "description": "SurrealDB world using LIVE SELECT for queueing and real-time streaming",
       "repository": "https://github.com/sepcnt/workflow-world-surrealdb",
-      "docs": "/docs/deploying/world/surrealdb-world",
+      "docs": "https://github.com/sepcnt/workflow-world-surrealdb",
       "features": [],
       "env": {
         "WORKFLOW_TARGET_WORLD": "workflow-world-surrealdb",
