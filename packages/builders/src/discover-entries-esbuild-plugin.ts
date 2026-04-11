@@ -7,7 +7,6 @@ import { applySwcTransform } from './apply-swc-transform.js';
 import {
   detectWorkflowPatterns,
   isGeneratedWorkflowFile,
-  isWorkflowSdkFile,
 } from './transform-utils.js';
 
 const enhancedResolve = promisify(enhancedResolveOriginal);
@@ -80,7 +79,12 @@ export function createDiscoverEntriesPlugin(
   return {
     name: 'discover-entries-esbuild-plugin',
     setup(build) {
-      build.onResolve({ filter: jsTsRegex }, async (args) => {
+      // Track parent→child import relationships for ALL imports (not just
+      // those with file extensions) so that `parentHasChild()` can correctly
+      // identify transitive parents of serde/step files even when the
+      // dependency chain passes through bare specifier imports like
+      // `@workflow/core/runtime` or `workflow/runtime`.
+      build.onResolve({ filter: /.*/ }, async (args) => {
         try {
           const resolved = await enhancedResolve(args.resolveDir, args.path);
 
@@ -172,11 +176,7 @@ export function createDiscoverEntriesPlugin(
               state.discoveredSteps.add(normalizedPath);
             }
 
-            // For @workflow SDK packages, only discover files with actual
-            // directives, not files that just match serde patterns (internal
-            // SDK implementation files).
-            const isSdkFile = isWorkflowSdkFile(args.path);
-            if (hasManifestEntries(workflowManifest.classes) && !isSdkFile) {
+            if (hasManifestEntries(workflowManifest.classes)) {
               state.discoveredSerdeFiles.add(normalizedPath);
             }
           } else {

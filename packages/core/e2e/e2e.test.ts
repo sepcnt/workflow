@@ -411,7 +411,7 @@ describe('e2e', () => {
     // Poll until all 3 webhooks are registered.
     // On Vercel, webhook registration can be slow due to cold starts and
     // queue processing latency, so we allow up to 60s.
-    const world = getWorld();
+    const world = await getWorld();
     const hooks = await (async () => {
       const deadline = Date.now() + 60_000;
       while (Date.now() < deadline) {
@@ -596,6 +596,16 @@ describe('e2e', () => {
     );
     expect(returnValue.stepMetadata.url).toBeUndefined();
 
+    // workflow context should have features and stepMetadata shouldn't
+    expect(returnValue.workflowMetadata.features).toBeDefined();
+    expect(typeof returnValue.workflowMetadata.features.encryption).toBe(
+      'boolean'
+    );
+    expect(returnValue.innerWorkflowMetadata.features).toStrictEqual(
+      returnValue.workflowMetadata.features
+    );
+    expect(returnValue.stepMetadata.features).toBeUndefined();
+
     // workflow context shouldn't have stepId, stepStartedAt, or attempt
     expect(returnValue.workflowMetadata.stepId).toBeUndefined();
     expect(returnValue.workflowMetadata.stepStartedAt).toBeUndefined();
@@ -708,7 +718,7 @@ describe('e2e', () => {
   });
 
   describe.skipIf(isLocalDeployment())(
-    'outputStreamWorkflow - getTailIndex and getStreamChunks',
+    'outputStreamWorkflow - getTailIndex and getChunks',
     () => {
       test(
         'getTailIndex returns correct index after stream completes',
@@ -745,7 +755,7 @@ describe('e2e', () => {
       );
 
       test(
-        'getStreamChunks returns same content as reading the stream',
+        'getChunks returns same content as reading the stream',
         {
           timeout: 60_000,
         },
@@ -762,13 +772,13 @@ describe('e2e', () => {
             streamChunks.push(value);
           }
 
-          // Read all chunks via getStreamChunks pagination
-          const world = getWorld();
+          // Read all chunks via getChunks pagination
+          const world = await getWorld();
           const streamName = `${run.runId.replace('wrun_', 'strm_')}_user`;
           const paginatedChunks: Uint8Array[] = [];
           let cursor: string | null = null;
           do {
-            const page = await world.getStreamChunks(streamName, run.runId, {
+            const page = await world.streams.getChunks(run.runId, streamName, {
               limit: 1, // small page size to exercise pagination
               ...(cursor ? { cursor } : {}),
             });
@@ -926,11 +936,11 @@ describe('e2e', () => {
             // Workflow catches the error and returns it
             expect(result.caught).toBe(true);
             expect(result.message).toContain('Step error message');
-            // Stack trace can show either the original step function or its transformed wrapper name
-            expect(result.stack).toMatch(/errorStepFn|registerStepFunction/);
+            // Stack trace should contain the original step function name
+            expect(result.stack).toContain('errorStepFn');
             expect(result.stack).not.toContain('evalmachine');
 
-            // Source maps are not supported everyhwere. Check the definition
+            // Source maps are not supported everywhere. Check the definition
             // of hasStepSourceMaps() to see where they are supported
             if (hasStepSourceMaps()) {
               expect(result.stack).toContain('99_e2e.ts');
@@ -948,13 +958,11 @@ describe('e2e', () => {
             expect(failedStep.status).toBe('failed');
             expect(failedStep.error.message).toContain('Step error message');
 
-            // Step error stack can show either the original step function or its transformed wrapper name
-            expect(failedStep.error.stack).toMatch(
-              /errorStepFn|registerStepFunction/
-            );
+            // Step error stack should contain the original step function name
+            expect(failedStep.error.stack).toContain('errorStepFn');
             expect(failedStep.error.stack).not.toContain('evalmachine');
 
-            // Source maps are not supported everyhwere. Check the definition
+            // Source maps are not supported everywhere. Check the definition
             // of hasStepSourceMaps() to see where they are supported
             if (hasStepSourceMaps()) {
               expect(failedStep.error.stack).toContain('99_e2e.ts');
@@ -982,12 +990,10 @@ describe('e2e', () => {
             );
             // Stack trace propagates to caught error with function names and source file
             expect(result.stack).toContain('throwErrorFromStep');
-            expect(result.stack).toMatch(
-              /stepThatThrowsFromHelper|registerStepFunction/
-            );
+            expect(result.stack).toContain('stepThatThrowsFromHelper');
             expect(result.stack).not.toContain('evalmachine');
 
-            // Source maps are not supported everyhwere. Check the definition
+            // Source maps are not supported everywhere. Check the definition
             // of hasStepSourceMaps() to see where they are supported
             if (hasStepSourceMaps()) {
               expect(result.stack).toContain('helpers.ts');
@@ -1004,11 +1010,11 @@ describe('e2e', () => {
             );
             expect(failedStep.status).toBe('failed');
             expect(failedStep.error.stack).toContain('throwErrorFromStep');
-            expect(failedStep.error.stack).toMatch(
-              /stepThatThrowsFromHelper|registerStepFunction/
+            expect(failedStep.error.stack).toContain(
+              'stepThatThrowsFromHelper'
             );
             expect(failedStep.error.stack).not.toContain('evalmachine');
-            // Source maps are not supported everyhwere. Check the definition
+            // Source maps are not supported everywhere. Check the definition
             // of hasStepSourceMaps() to see where they are supported
             if (hasStepSourceMaps()) {
               expect(failedStep.error.stack).toContain('helpers.ts');
@@ -1522,6 +1528,45 @@ describe('e2e', () => {
     }
   );
 
+  test(
+    'runClassSerializationWorkflow - Run instances serialize across workflow/step boundaries',
+    { timeout: 120_000 },
+    async () => {
+      const inputValue = 21;
+      const run = await start(await e2e('runClassSerializationWorkflow'), [
+        inputValue,
+      ]);
+      const returnValue = await run.returnValue;
+
+      expect(returnValue).toHaveProperty('isRunInWorkflow', true);
+      expect(returnValue).toHaveProperty('childRunId');
+      expect(returnValue).toHaveProperty('runIdFromStep');
+      expect(returnValue).toHaveProperty('childResult');
+
+      expect(typeof returnValue.childRunId).toBe('string');
+      expect(returnValue.childRunId.startsWith('wrun_')).toBe(true);
+      expect(returnValue.runIdFromStep).toBe(returnValue.childRunId);
+      expect(returnValue.childResult).toEqual({
+        childResult: inputValue * 2,
+        originalValue: inputValue,
+      });
+
+      const { json: parentRunData } = await cliInspectJson(
+        `runs ${run.runId} --withData`
+      );
+      expect(parentRunData.status).toBe('completed');
+
+      const { json: childRunData } = await cliInspectJson(
+        `runs ${returnValue.childRunId} --withData`
+      );
+      expect(childRunData.status).toBe('completed');
+      expect(childRunData.output).toEqual({
+        childResult: inputValue * 2,
+        originalValue: inputValue,
+      });
+    }
+  );
+
   // Skipped for Vercel since VQS doesn't support direct HTTP calls
   test.skipIf(!isLocalDeployment())(
     'health check endpoint (HTTP) - workflow and step endpoints respond to __health query parameter',
@@ -1549,9 +1594,12 @@ describe('e2e', () => {
       expect(flowBody).toEqual({
         healthy: true,
         endpoint: '/.well-known/workflow/v1/flow',
-        specVersion: SPEC_VERSION_CURRENT,
+        // specVersion comes from the World's declared specVersion (e.g. 3
+        // for world-vercel) or falls back to SPEC_VERSION_CURRENT (2).
+        specVersion: expect.any(Number),
         workflowCoreVersion: expect.any(String),
       });
+      expect(flowBody.specVersion).toBeGreaterThanOrEqual(SPEC_VERSION_CURRENT);
 
       // Test the step endpoint health check
       const stepHealthUrl = new URL(
@@ -1568,9 +1616,10 @@ describe('e2e', () => {
       expect(stepBody).toEqual({
         healthy: true,
         endpoint: '/.well-known/workflow/v1/step',
-        specVersion: SPEC_VERSION_CURRENT,
+        specVersion: expect.any(Number),
         workflowCoreVersion: expect.any(String),
       });
+      expect(stepBody.specVersion).toBeGreaterThanOrEqual(SPEC_VERSION_CURRENT);
     }
   );
 
@@ -1581,7 +1630,7 @@ describe('e2e', () => {
       // Tests the queue-based health check using healthCheck() directly.
       // This bypasses Vercel Deployment Protection by sending messages
       // through the Queue infrastructure rather than direct HTTP.
-      const world = getWorld();
+      const world = await getWorld();
 
       // Test workflow endpoint health check
       const workflowResult = await healthCheck(world, 'workflow', {
@@ -1978,7 +2027,7 @@ describe('e2e', () => {
       // This exercises the same cancelRun code path that the CLI uses
       // (the CLI delegates directly to this function).
       const { cancelRun } = await import('../src/runtime');
-      await cancelRun(getWorld(), run.runId);
+      await cancelRun(await getWorld(), run.runId);
 
       // Verify the run was cancelled - returnValue should throw WorkflowRunCancelledError
       const error = await run.returnValue.catch((e: unknown) => e);
@@ -2196,7 +2245,7 @@ describe('e2e', () => {
       // (run_created) throws a 500 server error. The queue should still
       // be dispatched with runInput, and the runtime should bootstrap
       // the run via the run_started fallback path.
-      const realWorld = getWorld();
+      const realWorld = await getWorld();
       let createCallCount = 0;
       const stubbedWorld: World = {
         ...realWorld,
